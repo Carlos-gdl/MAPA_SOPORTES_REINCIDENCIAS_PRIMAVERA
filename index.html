@@ -1,0 +1,152 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Soportes y Reincidencias · Primavera · V1.13</title>
+  <link rel="preconnect" href="https://unpkg.com">
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin="" />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div>
+      <h1>Soportes y Reincidencias</h1>
+      <p>Distrito GDL La Primavera · cuadrícula fija 300 × 300 m · V1.13</p>
+    </div>
+    <div class="filebox">
+      <label class="btn primary" for="excelFile">Cargar / actualizar soportes</label>
+      <input id="excelFile" type="file" accept=".xls,.xlsx,.xlsm" hidden />
+      <label class="btn network-btn" for="networkFile">Cargar / actualizar base de red</label>
+      <input id="networkFile" type="file" accept=".xls,.xlsx,.xlsm" hidden />
+      <button id="clearDb" class="btn danger" type="button">Borrar histórico</button>
+    </div>
+  </header>
+
+  <section id="status" class="status info">Carga el reporte Excel. El nombre del archivo puede cambiar; la estructura interna debe conservarse.</section>
+
+  <section class="search-panel panel"><label for="mapSearch"><strong>Localizar cuenta o cuadrante</strong></label><div class="search-actions"><input id="mapSearch" type="search" placeholder="Cuenta (10 dígitos) o Q_-38380-7835" autocomplete="off"><button id="searchGo" class="btn primary" type="button">Buscar</button><button id="searchNext" class="btn" type="button" hidden>Siguiente ubicación</button><button id="searchClear" class="btn" type="button">Limpiar</button></div><div id="searchResult" class="search-result" role="status" aria-live="polite">La búsqueda respeta los filtros activos.</div></section>
+  <main>
+    <section class="kpis">
+      <article><span>Eventos seleccionados</span><strong id="kEvents">0</strong></article>
+      <article><span>Cuentas únicas</span><strong id="kAccounts">0</strong></article>
+      <article><span>Clientes reincidentes</span><strong id="kRepeat">0</strong></article>
+      <article><span>Cuadrantes con soportes</span><strong id="kCells">0</strong></article>
+      <article><span>Archivos cargados</span><strong id="kImports">0</strong></article>
+    </section>
+
+    <section class="workspace">
+      <aside class="panel controls">
+        <h2>Visualización</h2>
+        <div class="segmented" id="viewMode">
+          <button data-mode="supports" class="active">Soportes</button>
+          <button data-mode="repeat">Reincidencias</button>
+          <button data-mode="both">Ambos</button>
+        </div>
+
+        <h3>Años</h3>
+        <div class="row-actions">
+          <button id="yearsAll" class="mini">Todos</button>
+          <button id="yearsNone" class="mini">Ninguno</button>
+        </div>
+        <div id="years" class="multi-list compact"><span class="muted">Sin datos</span></div>
+
+        <h3>Semanas</h3>
+        <div class="row-actions">
+          <button id="weeksAll" class="mini">Todas</button>
+          <button id="weeksNone" class="mini">Ninguna</button>
+        </div>
+        <div id="weeks" class="weeks"><span class="muted">Sin datos</span></div>
+
+        <h3>Filtros</h3>
+        <div class="filter-title">Cluster</div>
+        <div class="row-actions">
+          <button id="clustersAll" class="mini">Todos</button>
+          <button id="clustersNone" class="mini">Ninguno</button>
+        </div>
+        <div id="clusters" class="multi-list"><span class="muted">Sin datos</span></div>
+        <label>Estatus
+          <select id="statusFilter"><option value="">Todos</option></select>
+        </label>
+
+        <h3>Archivo / histórico</h3>
+        <div id="importInfo" class="small muted">Todavía no hay archivos cargados.</div>
+        <h3>Base de red</h3>
+        <div id="networkInfo" class="small muted">No hay base de red cargada.</div>
+        <button id="clearNetwork" class="mini network-clear" type="button">Eliminar base local</button>
+      </aside>
+
+      <section class="mapwrap">
+        <div id="map"></div>
+        <div class="quadrant-visibility-control"><label for="quadrantVisibility">Cuadrantes visibles</label><select id="quadrantVisibility"><option value="all">Todos</option><option value="top1">Top 1</option><option value="top2">Top 2</option><option value="top3">Top 3</option><option value="top4">Top 4</option><option value="top5">Top 5</option><option value="manual">Manual</option></select></div><button id="mapFullscreen" class="map-fullscreen-btn" type="button" title="Pantalla completa">⛶ Pantalla completa</button>
+        <div class="legend">
+          <div><span class="swatch supports"></span> Soportes: intensidad por eventos</div>
+          <div><span class="swatch repeat"></span> Reincidencias: clientes con ≥2 eventos</div>
+        </div>
+      </section>
+    </section>
+
+    <section class="bulk-visibility panel" id="bulkVisibilityPanel">
+      <div class="bulk-visibility-title"><strong>Visibilidad rápida de cuadrantes</strong><span id="bulkVisibilityInfo">Controla el Top 10 y el resto del mapa sin modificar los cálculos.</span></div>
+      <div class="bulk-visibility-actions">
+        <div class="bulk-group"><span>Top 10</span><button id="top10On" class="mini" type="button">Encender todos</button><button id="top10Off" class="mini" type="button">Apagar todos</button></div>
+        <div class="bulk-group"><span>Fuera del Top 10</span><button id="restOn" class="mini" type="button">Encender todos</button><button id="restOff" class="mini" type="button">Apagar todos</button></div>
+        <button id="showAllQuadrants" class="mini bulk-reset" type="button">Encender todo el mapa</button>
+      </div>
+    </section>
+
+    <section class="rankings">
+      <article class="panel" id="supportsRanking">
+        <div class="panel-title"><h2>Top 10 zonas con más soportes</h2><span>Eventos por cuadrante</span><button class="mini kmz-all" data-kind="supports" type="button">Descargar Top 10 KMZ</button></div>
+        <div class="table-scroll"><table><thead><tr><th>Ver</th><th>#</th><th>Cuadrante</th><th>Cluster</th><th>Soportes</th><th>Reincidentes</th><th>Excel</th><th>KMZ</th></tr></thead><tbody id="topSupports"></tbody></table></div>
+      </article>
+      <article class="panel" id="repeatRanking">
+        <div class="panel-title"><h2>Top 10 zonas con más reincidencias</h2><span>Clientes reincidentes por cuadrante</span><button class="mini kmz-all" data-kind="repeat" type="button">Descargar Top 10 KMZ</button></div>
+        <div class="table-scroll"><table><thead><tr><th>Ver</th><th>#</th><th>Cuadrante</th><th>Cluster</th><th>Reincidentes</th><th>Soportes</th><th>Excel</th><th>KMZ</th></tr></thead><tbody id="topRepeat"></tbody></table></div>
+      </article>
+    </section>
+
+
+    <section class="network-quality panel" id="networkQualityPanel">
+      <div><strong>Cruce con base de red</strong><span id="networkQuality">Carga la base de red para habilitar análisis por PON.</span></div>
+    </section>
+
+    <section class="panel" style="margin-bottom:14px"><label for="ponScope"><strong>Concentración de incidencias por PON:</strong></label> <select id="ponScope"><option value="all">Todo el distrito (según filtros)</option><option value="topSupports">Top 10 cuadrantes con más soportes</option><option value="topRepeat">Top 10 cuadrantes con más reincidencias</option></select></section>
+    <section class="pon-rankings rankings" id="ponRankings">
+      <article class="panel">
+        <div class="panel-title"><h2>Top 10 PON con más soportes</h2><span>OLT + Frame + Slot + Puerto</span></div>
+        <div class="table-scroll"><table><thead><tr><th>#</th><th>OLT</th><th>F</th><th>S</th><th>Puerto</th><th>Soportes</th><th>Cuentas</th><th>Reincidentes</th></tr></thead><tbody id="topPonSupports"><tr><td colspan="8" class="muted">Carga la base de red.</td></tr></tbody></table></div>
+      </article>
+      <article class="panel">
+        <div class="panel-title"><h2>Top 10 PON con más reincidencias</h2><span>Cuentas reincidentes por PON</span></div>
+        <div class="table-scroll"><table><thead><tr><th>#</th><th>OLT</th><th>F</th><th>S</th><th>Puerto</th><th>Reincidentes</th><th>Soportes</th><th>Cuentas</th></tr></thead><tbody id="topPonRepeat"><tr><td colspan="8" class="muted">Carga la base de red.</td></tr></tbody></table></div>
+      </article>
+    </section>
+
+    <section class="panel compare" id="comparePanel">
+      <div class="panel-title"><h2>Coincidencias Top 10</h2><span>Zonas que aparecen en ambos rankings</span></div>
+      <div id="compareSummary" class="compare-summary">Sin datos.</div>
+      <div class="table-scroll"><table><thead><tr><th>Cuadrante</th><th>Cluster</th><th>Pos. soportes</th><th>Soportes</th><th>Pos. reincidencias</th><th>Reincidentes</th><th>Coincide</th></tr></thead><tbody id="compareBody"></tbody></table></div>
+    </section>
+
+    <section class="panel detail">
+      <div class="panel-title"><h2>Detalle del cuadrante seleccionado</h2><span id="detailHint">Haz clic en un cuadrante o en un Top 10</span></div>
+      <div id="cellDetail" class="muted">Sin selección.</div>
+    </section>
+  </main>
+
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
+  <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
+  <div id="importModal" class="import-modal-backdrop" hidden role="dialog" aria-modal="true" aria-labelledby="importModalTitle">
+    <div class="import-modal-card">
+      <div class="import-modal-heading"><span id="importModalIcon" aria-hidden="true">↻</span><strong id="importModalTitle">Cargando archivo…</strong></div>
+      <div id="importModalFile" class="import-modal-file"></div>
+      <progress id="importModalBar" max="100" value="0"></progress>
+      <div class="import-modal-progress"><span id="importModalDetail" aria-live="polite"></span><b id="importModalPercent">0%</b></div>
+      <div class="import-modal-actions"><button id="importModalAccept" type="button" hidden>Aceptar</button></div>
+    </div>
+  </div>
+  <script src="app.js"></script>
+</body>
+</html>
