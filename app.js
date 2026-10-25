@@ -4,8 +4,26 @@ const DB='primavera_soportes_v12', STORE='events', IMPORTS='imports', NETWORK='n
 const NETWORK_REQUIRED=['Cuenta','OLT','Frame','Slot','Port'];
 let searchMarker=null, searchOutline=null, searchAccount='', searchLocations=[];
 let initialMapFitDone=false; // V1.13.1: conservar zoom del usuario
+let pointsEnabled=false, pointsMode='both', pointsScope='visible', pointLayers=null;
 let db, allEvents=[], imports=[], networkIndex=new Map(), networkMeta=null, selectedYears=new Set(), selectedWeekNums=new Set(), selectedClusters=new Set(), viewMode='supports', layers=[], selectedCell=null, quadrantVisibility='all', manualVisibleIds=new Set();
 const $=id=>document.getElementById(id);
+// V-42: initialization readiness is independent of whether the database contains records.
+let storageReady=false;
+let resolveStorageReady,rejectStorageReady;
+const storageReadyPromise=new Promise((resolve,reject)=>{resolveStorageReady=resolve;rejectStorageReady=reject});
+// Avoid an unhandled rejection if the browser denies IndexedDB access.
+storageReadyPromise.catch(()=>{});
+function setStorageReady(ready){
+ storageReady=ready;
+ for(const [input,label] of [['excelFile','supportUploadLabel'],['networkFile','networkUploadLabel']]){
+  $(input).disabled=!ready;$(label).classList.toggle('upload-locked',!ready);$(label).setAttribute('aria-disabled',String(!ready));
+ }
+}
+async function requireStorage(){
+ await storageReadyPromise;
+ if(!storageReady||!db)throw new Error('El almacenamiento local todavía no está disponible. Actualiza la página e inténtalo de nuevo.');
+}
+
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const norm=s=>String(s??'').trim();
 function status(msg,type='info'){const e=$('status');e.textContent=msg;e.className='status '+type}
@@ -57,8 +75,25 @@ function importYield(){return new Promise(resolve=>setTimeout(resolve,0))}
 $('importModalAccept').onclick=()=>{$('importModal').hidden=true;importDialog.open=false};
 async function ingest(file){status('Validando y procesando el Excel…','info');const buf=await file.arrayBuffer();importProgress('Cargando soportes',file.name,15,'Archivo leído; interpretando Excel…');await importYield();let wb;try{wb=XLSX.read(buf,{type:'array',cellDates:true})}catch(e){throw new Error('No fue posible leer el archivo como Excel.')}
  const ws=wb.Sheets[wb.SheetNames[0]];const matrix=XLSX.utils.sheet_to_json(ws,{header:1,defval:'',raw:true});let hi=-1;for(let i=0;i<Math.min(matrix.length,15);i++){const set=new Set(matrix[i].map(norm));if(REQUIRED.filter(h=>set.has(h)).length>=10){hi=i;break}}if(hi<0)throw new Error('No se encontró la fila de encabezados esperada.');const headers=matrix[hi].map(norm);const missing=REQUIRED.filter(h=>!headers.includes(h));if(missing.length)throw new Error('Estructura diferente. Faltan columnas: '+missing.join(', '));
- importProgress('Cargando soportes',file.name,35,'Encabezados validados; procesando registros…');await importYield();const rows=[];let invalid=0;for(let i=hi+1;i<matrix.length;i++){const a=matrix[i];if(!a||a.every(v=>norm(v)===''))continue;const r={};headers.forEach((h,j)=>{if(h)r[h]=a[j]});if(norm(r.Tipo).toLowerCase()!=='soporte')continue;const lat=Number(String(r.Latitud).replace(',','.')),lon=Number(String(r.Longitud).replace(',','.'));const d=excelDate(r['Fecha creacion FFM']);if(!validLL(lat,lon)||!d){invalid++;continue}const c=cellFor(lat,lon);rows.push({key:eventKey(r,i),cuenta:norm(r.Cuenta),nombre:norm(r['Nombre cliente']),ticket:norm(r.Ticket),os:norm(r.OS),ot:norm(r.OT),subtipo:norm(r.Subtipo),distrito:norm(r.Distrito),cluster:norm(r.Cluster)||'SIN CLUSTER',lat,lon,date:d.toISOString(),week:isoWeek(d),estatus:norm(r.Estatus)||'SIN ESTATUS',estado:norm(r.Estado),motivo:norm(r.Motivo),cell:c.id,ix:c.ix,iy:c.iy});if(i%1200===0){importProgress('Cargando soportes',file.name,35+Math.floor(40*(i-hi)/Math.max(1,matrix.length-hi)),'Procesando '+(i-hi).toLocaleString('es-MX')+' registros…');await importYield()}}
- if(!rows.length)throw new Error('El archivo no contiene registros de Soporte con fecha y coordenadas válidas.');importProgress('Cargando soportes',file.name,80,'Guardando registros en el navegador…');await importYield();await putMany(STORE,rows);const dates=rows.map(x=>new Date(x.date)).sort((a,b)=>a-b);const imp={id:Date.now()+':'+file.name,name:file.name,loadedAt:new Date().toISOString(),rows:rows.length,invalid,from:dates[0].toISOString(),to:dates[dates.length-1].toISOString()};await putMany(IMPORTS,[imp]);await reload();importComplete('Soportes cargados correctamente',file.name,`${rows.length.toLocaleString('es-MX')} soportes válidos · ${invalid.toLocaleString('es-MX')} omitidos`);status(`Archivo procesado: ${rows.length.toLocaleString('es-MX')} soportes válidos; ${invalid.toLocaleString('es-MX')} filas sin fecha/coordenadas válidas fueron omitidas. Los eventos repetidos se actualizaron, no se duplicaron.`,'ok')}
+ importProgress('Cargando soportes',file.name,35,'Encabezados validados; procesando registros…');await importYield();const rows=[];let invalid=0;for(let i=hi+1;i<matrix.length;i++){const a=matrix[i];if(!a||a.every(v=>norm(v)===''))continue;const r={};headers.forEach((h,j)=>{if(h)r[h]=a[j]});if(norm(r.Tipo).toLowerCase()!=='soporte')continue;const lat=Number(String(r.Latitud).replace(',','.')),lon=Number(String(r.Longitud).replace(',','.'));const d=excelDate(r['Fecha creacion FFM']);if(!validLL(lat,lon)||!d){invalid++;continue}const c=cellFor(lat,lon);rows.push({key:eventKey(r,i),cuenta:norm(r.Cuenta),nombre:norm(r['Nombre cliente']),ticket:norm(r.Ticket),os:norm(r.OS),ot:norm(r.OT),subtipo:norm(r.Subtipo),distrito:norm(r.Distrito),cluster:norm(r.Cluster)||'SIN CLUSTER',lat,lon,date:d.toISOString(),week:isoWeek(d),estatus:norm(r.Estatus)||'SIN ESTATUS',estado:norm(r.Estado),motivo:norm(r.Motivo),raw:r,cell:c.id,ix:c.ix,iy:c.iy});if(i%1200===0){importProgress('Cargando soportes',file.name,35+Math.floor(40*(i-hi)/Math.max(1,matrix.length-hi)),'Procesando '+(i-hi).toLocaleString('es-MX')+' registros…');await importYield()}}
+ if(!rows.length)throw new Error('El archivo no contiene registros de Soporte con fecha y coordenadas válidas.');importProgress('Cargando soportes',file.name,80,'Guardando registros en el navegador…');await importYield();const existing=await txGetAll(STORE),byOs=new Map(),byKey=new Map(existing.map(e=>[e.key,e]));
+ for(const e of existing)if(e.os&&!byOs.has(e.os))byOs.set(e.os,e);
+ const pending=new Map();let added=0,updated=0,unchanged=0,duplicatesInFile=0;
+ for(const incoming of rows){
+  const prior=(incoming.os&&byOs.get(incoming.os))||byKey.get(incoming.key)||pending.get(incoming.key);
+  if(prior){
+   // No overwrite of valid existing values: fill missing fields only, preserving original event key.
+   const merged={...prior};let changed=false;
+   for(const [field,value] of Object.entries(incoming)){
+    if(field==='key')continue;
+    if((merged[field]===undefined||merged[field]===null||merged[field]==='')&&value!==undefined&&value!==null&&value!==''){merged[field]=value;changed=true}
+   }
+   if(changed){pending.set(prior.key,merged);updated++}else unchanged++;
+   if(pending.has(prior.key))duplicatesInFile++;
+   byKey.set(prior.key,merged);if(merged.os)byOs.set(merged.os,merged);
+  }else{pending.set(incoming.key,incoming);byKey.set(incoming.key,incoming);if(incoming.os)byOs.set(incoming.os,incoming);added++}
+ }
+ if(pending.size)await putMany(STORE,[...pending.values()]);const dates=rows.map(x=>new Date(x.date)).sort((a,b)=>a-b);const imp={id:Date.now()+':'+file.name,name:file.name,loadedAt:new Date().toISOString(),rows:rows.length,added,updated,unchanged,invalid,from:dates[0].toISOString(),to:dates[dates.length-1].toISOString()};if(added||updated||!imports.some(x=>x.name===file.name))await putMany(IMPORTS,[imp]);await reload();importComplete('Soportes cargados correctamente',file.name,`${added.toLocaleString('es-MX')} nuevos · ${updated.toLocaleString('es-MX')} completados · ${unchanged.toLocaleString('es-MX')} existentes sin cambios · ${invalid.toLocaleString('es-MX')} omitidos`);status(`Archivo procesado: ${added.toLocaleString('es-MX')} nuevos; ${updated.toLocaleString('es-MX')} completados; ${unchanged.toLocaleString('es-MX')} existentes sin cambios; ${invalid.toLocaleString('es-MX')} inválidos. No se duplicaron OS.`,'ok')}
 function normalizeAccount(v){return norm(v).replace(/\s+/g,'')}
 function networkCandidates(v){const x=normalizeAccount(v);return x?[x]:[]}
 function networkFor(cuenta){return networkIndex.get(normalizeAccount(cuenta))||null}
@@ -128,13 +163,94 @@ if(typeof ResizeObserver!=='undefined'){
 }
 window.addEventListener('load',()=>setTimeout(()=>map.invalidateSize({pan:false}),250));
 function color(v,max,type){if(!v)return '#ffffff';const r=v/Math.max(max,1);if(type==='repeat')return r>.7?'#8e1b13':r>.4?'#c0392b':r>.2?'#e67e73':'#f5b7b1';return r>.7?'#0b3d66':r>.4?'#1769aa':r>.2?'#4d94c4':'#9ec5df'}
-function rankedCells(a){const supports=[...a.cells].filter(c=>c.supports).sort((x,y)=>y.supports-x.supports||y.repeats-x.repeats),repeat=[...a.cells].filter(c=>c.repeats).sort((x,y)=>y.repeats-x.repeats||y.supports-x.supports);return {supports,repeat}}
-function autoVisibleIds(a){if(quadrantVisibility==='all')return null;if(quadrantVisibility==='manual')return new Set(manualVisibleIds);const n=Number(quadrantVisibility.replace('top',''))||1,r=rankedCells(a);if(viewMode==='supports')return new Set(r.supports.slice(0,n).map(c=>c.id));if(viewMode==='repeat')return new Set(r.repeat.slice(0,n).map(c=>c.id));return new Set([...r.supports.slice(0,n),...r.repeat.slice(0,n)].map(c=>c.id))}
-function currentTop10Ids(a){const r=rankedCells(a);if(viewMode==='supports')return new Set(r.supports.slice(0,10).map(c=>c.id));if(viewMode==='repeat')return new Set(r.repeat.slice(0,10).map(c=>c.id));return new Set([...r.supports.slice(0,10),...r.repeat.slice(0,10)].map(c=>c.id))}
+// V1.15: convergencia equilibrada. Media geométrica normalizada:
+// puntuación = sqrt((soportes / máximo soportes) * (reincidentes / máximo reincidentes)).
+// Se ordenan TODOS los cuadrantes; si hay menos de diez con convergencia,
+// se completa el Top 10 con los siguientes de mayor actividad.
+function rankedCells(a){
+ const supports=[...a.cells].filter(c=>c.supports>0).sort((x,y)=>y.supports-x.supports||y.repeats-x.repeats||x.id.localeCompare(y.id));
+ const repeat=[...a.cells].filter(c=>c.repeats>0).sort((x,y)=>y.repeats-x.repeats||y.supports-x.supports||x.id.localeCompare(y.id));
+ const maxS=Math.max(1,...a.cells.map(c=>c.supports)),maxR=Math.max(1,...a.cells.map(c=>c.repeats));
+ const combined=[...a.cells].filter(c=>c.supports>0).sort((x,y)=>{
+  const sx=Math.sqrt((x.supports/maxS)*(x.repeats/maxR));
+  const sy=Math.sqrt((y.supports/maxS)*(y.repeats/maxR));
+  return sy-sx||y.repeats-x.repeats||y.supports-x.supports||x.id.localeCompare(y.id);
+ });
+ return {supports,repeat,combined};
+}
+function rankedForMode(a){const r=rankedCells(a);return viewMode==='supports'?r.supports:viewMode==='repeat'?r.repeat:r.combined}
+function autoVisibleIds(a){
+ if(quadrantVisibility==='all')return null;
+ if(quadrantVisibility==='manual')return new Set(manualVisibleIds);
+ const n=Number(quadrantVisibility.replace('top',''))||1;
+ return new Set(rankedForMode(a).slice(0,n).map(c=>c.id));
+}
+function currentTop10Ids(a){return new Set(rankedForMode(a).slice(0,10).map(c=>c.id))}
 function ensureManual(a){if(quadrantVisibility!=='manual'){const current=autoVisibleIds(a);manualVisibleIds=current===null?new Set(a.cells.map(c=>c.id)):new Set(current);quadrantVisibility='manual';$('quadrantVisibility').value='manual'}}
 function bulkVisibility(kind,on){const a=analyze(filtered());ensureManual(a);const top=currentTop10Ids(a),targets=kind==='top'?top:new Set(a.cells.filter(c=>!top.has(c.id)).map(c=>c.id));targets.forEach(id=>on?manualVisibleIds.add(id):manualVisibleIds.delete(id));selectedCell=null;render()}
 function updateBulkInfo(a){const top=currentTop10Ids(a),visible=autoVisibleIds(a),isOn=id=>visible===null||visible.has(id),topOn=[...top].filter(isOn).length,rest=a.cells.filter(c=>!top.has(c.id)),restOn=rest.filter(c=>isOn(c.id)).length;$('bulkVisibilityInfo').textContent=`Top 10 visibles: ${topOn}/${top.size} · Fuera del Top 10: ${restOn}/${rest.length}`;}
 function draw(a){requestAnimationFrame(()=>map.invalidateSize({pan:false,debounceMoveend:true}));layers.forEach(l=>map.removeLayer(l));layers=[];const maxS=Math.max(1,...a.cells.map(c=>c.supports)),maxR=Math.max(1,...a.cells.map(c=>c.repeats)),allowed=autoVisibleIds(a),visibleBounds=[];a.cells.forEach(c=>{if(allowed&&!allowed.has(c.id))return;if(viewMode==='supports'&&!c.supports)return;if(viewMode==='repeat'&&!c.repeats)return;const b=boundsFor(c);visibleBounds.push(b[0],b[1]);if(viewMode==='both'){if(c.supports){const p=L.rectangle(b,{color:'#1769aa',weight:1,fillColor:color(c.supports,maxS,'supports'),fillOpacity:.42}).addTo(map);p.on('click',()=>selectCell(c,a));layers.push(p)}if(c.repeats){const ctr=centerFor(c),rad=Math.min(120,25+95*c.repeats/maxR),p=L.circle([ctr.lat,ctr.lon],{radius:rad,color:'#a52a1d',weight:2,fillColor:color(c.repeats,maxR,'repeat'),fillOpacity:.55}).addTo(map);p.on('click',()=>selectCell(c,a));layers.push(p)}}else{const val=viewMode==='repeat'?c.repeats:c.supports,typ=viewMode==='repeat'?'repeat':'supports',p=L.rectangle(b,{color:typ==='repeat'?'#9d2c22':'#1769aa',weight:1,fillColor:color(val,typ==='repeat'?maxR:maxS,typ),fillOpacity:.48}).addTo(map);p.bindTooltip(`${c.id}<br>${typ==='repeat'?'Reincidentes':'Soportes'}: <b>${val}</b>`);p.on('click',()=>selectCell(c,a));layers.push(p)}});if(!initialMapFitDone&&visibleBounds.length){initialMapFitDone=true;map.fitBounds(L.latLngBounds(visibleBounds),{padding:[28,28],maxZoom:15})}}
+// V1.16: puntos independientes de la visualización de polígonos.
+// Cada cuenta se representa una sola vez. Los contadores siempre usan los eventos filtrados.
+function pointPopup(account, events, isRepeat){
+ const sorted=[...events].sort((x,y)=>y.date.localeCompare(x.date));
+ const supportCount=events.length;
+ // Reincidente según la lógica vigente de V1.15: >=2 soportes filtrados.
+ const repeatCount=isRepeat?Math.max(0,supportCount-1):0;
+ const cols=[...new Set(sorted.flatMap(e=>Object.keys(e.raw||{})))];
+ const rows=sorted.map((e,i)=>{
+  const fields=cols.length?cols.map(k=>`<tr><th>${esc(k)}</th><td>${esc(String(e.raw[k]??''))}</td></tr>`).join(''):
+   Object.entries(e).filter(([k])=>!['raw','key','ix','iy'].includes(k)).map(([k,v])=>`<tr><th>${esc(k)}</th><td>${esc(String(v??''))}</td></tr>`).join('');
+  return `<details ${i===0?'open':''}><summary>Soporte ${i+1} · ${esc(e.date.slice(0,10))} · ${esc(e.ticket||e.os||e.ot||'Sin folio')}</summary><div class="point-popup-table"><table>${fields}</table></div></details>`;
+ }).join('');
+ return `<div class="point-popup"><b>Cuenta: ${esc(account)}</b><p>Soportes: <b>${supportCount}</b> · Reincidencias adicionales*: <b>${repeatCount}</b> · Cliente reincidente: <b>${isRepeat?'Sí':'No'}</b></p><p class="point-popup-note">*Conteo informativo dentro de los filtros actuales; no aplica aún la futura regla de 8 semanas.</p>${rows}</div>`;
+}
+function drawPoints(a){
+ if(!pointLayers)pointLayers=L.layerGroup().addTo(map);
+ pointLayers.clearLayers();
+ const info=$('pointsInfo');
+ if(!pointsEnabled){info.textContent='Marcadores apagados.';return}
+ const allowed=pointsScope==='visible'?autoVisibleIds(a):null;
+ const repeats=new Set(a.repeat.map(x=>x.cuenta));
+ const byAccount=new Map();
+ for(const [account,data] of a.accounts){
+  const isRepeat=repeats.has(account);
+  if(pointsMode==='repeat'&&!isRepeat)continue;
+  const events=allowed?data.events.filter(e=>allowed.has(e.cell)):data.events;
+  if(!events.length)continue;
+  // En modo de reincidencias solo marcar la cuenta en el cuadrante
+  // donde analyze() la atribuye; así coincide con el ranking.
+  if(pointsMode==='repeat' || (pointsMode==='both'&&isRepeat)){
+   const loc=a.cells.find(c=>c.accounts.some(x=>x.cuenta===account));
+   if(!loc || (allowed&&!allowed.has(loc.id))){
+    if(pointsMode==='repeat')continue;
+   }else if(pointsMode==='repeat'){
+    const own=events.filter(e=>e.cell===loc.id);
+    if(!own.length)continue;
+   }
+  }
+  byAccount.set(account,{events,isRepeat});
+ }
+ let count=0;
+ for(const [account,{events,isRepeat}] of byAccount){
+  const locCell=(pointsMode==='repeat')?a.cells.find(c=>c.accounts.some(x=>x.cuenta===account))?.id:null;
+  const locationEvents=locCell?events.filter(e=>e.cell===locCell):events;
+  const latest=[...locationEvents].sort((x,y)=>y.date.localeCompare(x.date))[0];
+  if(!latest||!Number.isFinite(latest.lat)||!Number.isFinite(latest.lon))continue;
+  const supportCount=events.length;
+  const extra=isRepeat?Math.max(0,(a.accounts.get(account)?.events.length||0)-1):0;
+  const showRepeat=isRepeat&&pointsMode!=='supports';
+  const showSupport=pointsMode!=='repeat';
+  const hue=showRepeat&&showSupport?'dual':showRepeat?'repeat':'support';
+  const label=showRepeat&&showSupport?`${supportCount} / ${extra}`:showRepeat?`${extra}`:`${supportCount}`;
+  const icon=L.divIcon({className:'account-pin-wrap',html:`<span class="account-pin ${hue}" aria-hidden="true"><span class="pin-center"></span></span><span class="account-count">${label}</span>`,iconSize:[66,36],iconAnchor:[14,31],popupAnchor:[0,-28]});
+  const marker=L.marker([latest.lat,latest.lon],{icon,keyboard:true,title:`Cuenta ${account}`});
+  marker.bindTooltip(`<b>Cuenta: ${esc(account)}</b><br>Soportes: ${a.accounts.get(account).events.length}<br>Reincidencias adicionales*: ${extra}<br>Cliente reincidente: ${isRepeat?'Sí':'No'}`,{direction:'top',offset:[0,-26],sticky:false});
+  marker.bindPopup(()=>pointPopup(account,a.accounts.get(account).events,isRepeat),{maxWidth:470,maxHeight:360});
+  pointLayers.addLayer(marker);count++;
+ }
+ info.textContent=`${count.toLocaleString('es-MX')} cuentas ubicadas · ${pointsScope==='visible'?'Cuadrantes visibles':'Todos los cuadrantes'} · ${pointsMode==='both'?'Ambos':pointsMode==='supports'?'Soportes':'Reincidencias'}`;
+}
 function updateSearchOverlay(a){
  if(searchMarker){map.removeLayer(searchMarker);searchMarker=null}
  if(searchOutline){map.removeLayer(searchOutline);searchOutline=null}
@@ -161,18 +277,83 @@ function exportCell(cellId,type,a){const c=a.cells.find(z=>z.id===cellId);if(!c)
 function xmlSafe(v){return String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&apos;'}[c]))}
 function polygonKml(c,kind){const sw=mercToLL(c.ix*CELL,c.iy*CELL),ne=mercToLL((c.ix+1)*CELL,(c.iy+1)*CELL);const coords=[[sw.lon,sw.lat],[ne.lon,sw.lat],[ne.lon,ne.lat],[sw.lon,ne.lat],[sw.lon,sw.lat]].map(x=>x.join(',')+',0').join(' ');return `<Placemark><name>${xmlSafe(c.id)}</name><description>${xmlSafe('Cluster: '+c.cluster+' | Soportes: '+c.supports+' | Reincidentes: '+c.repeats+' | Ranking: '+(kind==='supports'?'Soportes':'Reincidencias'))}</description><styleUrl>#${kind}</styleUrl><Polygon><tessellate>1</tessellate><outerBoundaryIs><LinearRing><coordinates>${coords}</coordinates></LinearRing></outerBoundaryIs></Polygon></Placemark>`}
 async function downloadKmz(kind,cells){if(!cells.length){alert('No hay cuadrantes para exportar con los filtros actuales.');return}if(typeof JSZip==='undefined'){alert('No se pudo cargar el componente ZIP. Verifica tu conexión a internet e intenta de nuevo.');return}const title=kind==='supports'?'Soportes':'Reincidencias';const kml=`<?xml version="1.0" encoding="UTF-8"?><kml xmlns="http://www.opengis.net/kml/2.2"><Document><name>${title} · Cuadrantes Primavera</name><Style id="supports"><LineStyle><color>ffb46b17</color><width>2</width></LineStyle><PolyStyle><color>663d6b0b</color></PolyStyle></Style><Style id="repeat"><LineStyle><color>ff2b39c0</color><width>2</width></LineStyle><PolyStyle><color>662b39c0</color></PolyStyle></Style><Folder><name>Top ${cells.length} ${title}</name>${cells.map(c=>polygonKml(c,kind)).join('')}</Folder></Document></kml>`;try{const zip=new JSZip();zip.file('doc.kml',kml);const blob=await zip.generateAsync({type:'blob',compression:'DEFLATE'});const url=URL.createObjectURL(blob),link=document.createElement('a');link.href=url;link.download=`Primavera_${title}_${cells.length===1?cells[0].id:'Top10'}.kmz`;document.body.appendChild(link);link.click();link.remove();setTimeout(()=>URL.revokeObjectURL(url),30000)}catch(e){console.error(e);alert('No fue posible generar el KMZ: '+e.message)}}
-function topRows(a){updateBulkInfo(a);$('supportsRanking').style.display=viewMode==='repeat'?'none':'';$('repeatRanking').style.display=viewMode==='supports'?'none':'';$('comparePanel').style.display=viewMode==='both'?'':'none';$('supportsRanking').parentElement.classList.toggle('single-ranking',viewMode!=='both');const r=rankedCells(a),ts=r.supports.slice(0,10),tr=r.repeat.slice(0,10),allowed=autoVisibleIds(a),checked=c=>allowed===null||allowed.has(c.id);$('topSupports').innerHTML=ts.map((c,i)=>`<tr class="clickrow" data-cell="${c.id}"><td><input class="cell-toggle" type="checkbox" data-cell="${c.id}" ${checked(c)?'checked':''}></td><td>${i+1}</td><td>${c.id}</td><td>${esc(c.cluster)}</td><td><b>${c.supports}</b></td><td>${c.repeats}</td><td><button class="export-cell" data-export="supports" data-cell="${c.id}">Exportar</button></td><td><button class="kmz-cell" data-kind="supports" data-cell="${c.id}">Descargar</button></td></tr>`).join('');$('topRepeat').innerHTML=tr.map((c,i)=>`<tr class="clickrow" data-cell="${c.id}"><td><input class="cell-toggle" type="checkbox" data-cell="${c.id}" ${checked(c)?'checked':''}></td><td>${i+1}</td><td>${c.id}</td><td>${esc(c.cluster)}</td><td><b>${c.repeats}</b></td><td>${c.supports}</td><td><button class="export-cell" data-export="repeat" data-cell="${c.id}">Exportar</button></td><td><button class="kmz-cell" data-kind="repeat" data-cell="${c.id}">Descargar</button></td></tr>`).join('');const ps=new Map(ts.map((c,i)=>[c.id,i+1])),pr=new Map(tr.map((c,i)=>[c.id,i+1])),ids=[...new Set([...ps.keys(),...pr.keys()])],both=ids.filter(id=>ps.has(id)&&pr.has(id));$('compareSummary').textContent=`${both.length} de las zonas aparecen en ambos Top 10.`;$('compareBody').innerHTML=ids.sort((x,y)=>(ps.get(x)||99)-(ps.get(y)||99)).map(id=>{const c=a.cells.find(z=>z.id===id),yes=ps.has(id)&&pr.has(id);return `<tr class="clickrow" data-cell="${id}"><td>${id}</td><td>${esc(c?.cluster||'')}</td><td>${ps.get(id)||'—'}</td><td>${c?.supports||0}</td><td>${pr.get(id)||'—'}</td><td>${c?.repeats||0}</td><td><span class="badge ${yes?'yes':'no'}">${yes?'Sí':'No'}</span></td></tr>`}).join('');document.querySelectorAll('.clickrow').forEach(row=>row.classList.toggle('selected-quadrant',row.dataset.cell===selectedCell));document.querySelectorAll('.clickrow').forEach(row=>row.onclick=()=>{const c=a.cells.find(z=>z.id===row.dataset.cell);if(c)selectCell(c,a)});document.querySelectorAll('.export-cell').forEach(b=>b.onclick=e=>{e.stopPropagation();exportCell(b.dataset.cell,b.dataset.export,a)});document.querySelectorAll('.kmz-cell').forEach(b=>b.onclick=e=>{e.stopPropagation();downloadKmz(b.dataset.kind,[a.cells.find(c=>c.id===b.dataset.cell)].filter(Boolean))});document.querySelectorAll('.kmz-all').forEach(b=>b.onclick=()=>{const rr=rankedCells(a);downloadKmz(b.dataset.kind,(b.dataset.kind==='supports'?rr.supports:rr.repeat).slice(0,10))});document.querySelectorAll('.cell-toggle').forEach(cb=>cb.onclick=e=>{e.stopPropagation();if(quadrantVisibility!=='manual'){const current=autoVisibleIds(a);manualVisibleIds=current===null?new Set(a.cells.map(c=>c.id)):new Set(current);quadrantVisibility='manual';$('quadrantVisibility').value='manual'}cb.checked?manualVisibleIds.add(cb.dataset.cell):manualVisibleIds.delete(cb.dataset.cell);draw(a);topRows(a)})}
+function topRows(a){updateBulkInfo(a);$('supportsRanking').style.display=viewMode==='repeat'?'none':'';$('repeatRanking').style.display=viewMode==='supports'?'none':'';$('comparePanel').style.display=viewMode==='both'?'':'none';$('supportsRanking').parentElement.classList.toggle('single-ranking',viewMode!=='both');const r=rankedCells(a),ts=r.supports.slice(0,10),tr=r.repeat.slice(0,10),allowed=autoVisibleIds(a),checked=c=>allowed===null||allowed.has(c.id);$('topSupports').innerHTML=ts.map((c,i)=>`<tr class="clickrow" data-cell="${c.id}"><td><input class="cell-toggle" type="checkbox" data-cell="${c.id}" ${checked(c)?'checked':''}></td><td>${i+1}</td><td>${c.id}</td><td>${esc(c.cluster)}</td><td><b>${c.supports}</b></td><td>${c.repeats}</td><td><button class="export-cell" data-export="supports" data-cell="${c.id}">Exportar</button></td><td><button class="kmz-cell" data-kind="supports" data-cell="${c.id}">Descargar</button></td></tr>`).join('');$('topRepeat').innerHTML=tr.map((c,i)=>`<tr class="clickrow" data-cell="${c.id}"><td><input class="cell-toggle" type="checkbox" data-cell="${c.id}" ${checked(c)?'checked':''}></td><td>${i+1}</td><td>${c.id}</td><td>${esc(c.cluster)}</td><td><b>${c.repeats}</b></td><td>${c.supports}</td><td><button class="export-cell" data-export="repeat" data-cell="${c.id}">Exportar</button></td><td><button class="kmz-cell" data-kind="repeat" data-cell="${c.id}">Descargar</button></td></tr>`).join('');const ps=new Map(ts.map((c,i)=>[c.id,i+1])),pr=new Map(tr.map((c,i)=>[c.id,i+1])),ids=[...new Set([...ps.keys(),...pr.keys()])],both=ids.filter(id=>ps.has(id)&&pr.has(id));$('compareSummary').textContent=`${both.length} zonas coinciden en los Top 10 individuales. En modo Ambos, el mapa utiliza un Top 10 combinado por convergencia.`;$('compareBody').innerHTML=ids.sort((x,y)=>(ps.get(x)||99)-(ps.get(y)||99)).map(id=>{const c=a.cells.find(z=>z.id===id),yes=ps.has(id)&&pr.has(id);return `<tr class="clickrow" data-cell="${id}"><td>${id}</td><td>${esc(c?.cluster||'')}</td><td>${ps.get(id)||'—'}</td><td>${c?.supports||0}</td><td>${pr.get(id)||'—'}</td><td>${c?.repeats||0}</td><td><span class="badge ${yes?'yes':'no'}">${yes?'Sí':'No'}</span></td></tr>`}).join('');document.querySelectorAll('.clickrow').forEach(row=>row.classList.toggle('selected-quadrant',row.dataset.cell===selectedCell));document.querySelectorAll('.clickrow').forEach(row=>row.onclick=()=>{const c=a.cells.find(z=>z.id===row.dataset.cell);if(c)selectCell(c,a)});document.querySelectorAll('.export-cell').forEach(b=>b.onclick=e=>{e.stopPropagation();exportCell(b.dataset.cell,b.dataset.export,a)});document.querySelectorAll('.kmz-cell').forEach(b=>b.onclick=e=>{e.stopPropagation();downloadKmz(b.dataset.kind,[a.cells.find(c=>c.id===b.dataset.cell)].filter(Boolean))});document.querySelectorAll('.kmz-all').forEach(b=>b.onclick=()=>{const rr=rankedCells(a);downloadKmz(b.dataset.kind,(b.dataset.kind==='supports'?rr.supports:rr.repeat).slice(0,10))});document.querySelectorAll('.cell-toggle').forEach(cb=>cb.onclick=e=>{e.stopPropagation();if(quadrantVisibility!=='manual'){const current=autoVisibleIds(a);manualVisibleIds=current===null?new Set(a.cells.map(c=>c.id)):new Set(current);quadrantVisibility='manual';$('quadrantVisibility').value='manual'}cb.checked?manualVisibleIds.add(cb.dataset.cell):manualVisibleIds.delete(cb.dataset.cell);draw(a);drawPoints(a);topRows(a)})}
 function selectCell(c,a){selectedCell=c.id;const b=boundsFor(c);map.fitBounds(b,{maxZoom:17,padding:[40,40]});const reps=[...c.accounts].sort((x,y)=>y.events.length-x.events.length);const term=c.events.filter(e=>e.estatus.toLowerCase().includes('termin')).length,canc=c.events.filter(e=>e.estatus.toLowerCase().includes('cancel')).length;updateSearchOverlay(a);document.querySelectorAll('.clickrow').forEach(row=>row.classList.toggle('selected-quadrant',row.dataset.cell===c.id));$('detailHint').textContent=c.id;$('cellDetail').innerHTML=`<div class="detail-grid"><div><span>Cluster predominante</span><strong>${esc(c.cluster)}</strong></div><div><span>Soportes</span><strong>${c.supports}</strong></div><div><span>Clientes reincidentes</span><strong>${c.repeats}</strong></div><div><span>Terminadas / Canceladas</span><strong>${term} / ${canc}</strong></div></div><h3>Cuentas reincidentes del cuadrante</h3>${reps.length?`<div class="account-list"><table><thead><tr><th>Cuenta</th><th>Eventos</th><th>Último evento</th><th>Subtipos</th></tr></thead><tbody>${reps.map(a=>`<tr><td>${esc(a.cuenta)}</td><td><b>${a.events.length}</b></td><td>${new Date([...a.events].sort((x,y)=>y.date.localeCompare(x.date))[0].date).toLocaleDateString('es-MX')}</td><td>${esc([...new Set(a.events.map(e=>e.subtipo))].join(' · '))}</td></tr>`).join('')}</tbody></table></div>`:'<div class="muted">No hay clientes reincidentes en este cuadrante con los filtros actuales.</div>'}${cellPonTop(c)}`;}
-function render(){const ev=filtered(),a=analyze(ev);$('kEvents').textContent=ev.length.toLocaleString('es-MX');$('kAccounts').textContent=a.accounts.size.toLocaleString('es-MX');$('kRepeat').textContent=a.repeat.length.toLocaleString('es-MX');$('kCells').textContent=a.cells.filter(c=>c.supports).length.toLocaleString('es-MX');$('kImports').textContent=imports.length.toLocaleString('es-MX');draw(a);topRows(a);renderPon(a);updateSearchOverlay(a);if(selectedCell){const c=a.cells.find(z=>z.id===selectedCell);if(c){if(searchAccount&&!c.events.some(e=>e.cuenta===searchAccount))searchAccount='';selectCell(c,a)}else{$('cellDetail').textContent='El cuadrante seleccionado no tiene datos con los filtros actuales.'}}}
+function render(){const ev=filtered(),a=analyze(ev);$('kEvents').textContent=ev.length.toLocaleString('es-MX');$('kAccounts').textContent=a.accounts.size.toLocaleString('es-MX');$('kRepeat').textContent=a.repeat.length.toLocaleString('es-MX');$('kCells').textContent=a.cells.filter(c=>c.supports).length.toLocaleString('es-MX');/* V-46: el indicador kImports pertenece a la capa visual Clean Up. */draw(a);drawPoints(a);topRows(a);renderPon(a);updateSearchOverlay(a);if(selectedCell){const c=a.cells.find(z=>z.id===selectedCell);if(c){if(searchAccount&&!c.events.some(e=>e.cuenta===searchAccount))searchAccount='';selectCell(c,a)}else{$('cellDetail').textContent='El cuadrante seleccionado no tiene datos con los filtros actuales.'}}}
 $('searchGo').onclick=doMapSearch;$('mapSearch').addEventListener('keydown',e=>{if(e.key==='Enter')doMapSearch()});$('searchClear').onclick=clearMapSearch;$('searchNext').onclick=()=>{const i=searchLocations.indexOf(selectedCell),id=searchLocations[(i+1)%searchLocations.length],a=analyze(filtered()),c=a.cells.find(x=>x.id===id);if(c){selectCell(c,a);$('searchResult').textContent=`Ubicación ${((i+1)%searchLocations.length)+1} de ${searchLocations.length}: ${id}`}};
 $('ponScope').onchange=()=>renderPon(analyze(filtered()));
-$('networkFile').onchange=async e=>{const f=e.target.files[0];if(!f)return;importProgress('Cargando base de red',f.name,5,'Leyendo archivo…');try{await ingestNetwork(f)}catch(err){importFailed(f.name,err.message||String(err));status(err.message||String(err),'error')}finally{e.target.value=''}};
-$('excelFile').onchange=async e=>{const f=e.target.files[0];if(!f)return;importProgress('Cargando soportes',f.name,5,'Leyendo archivo…');try{await ingest(f)}catch(err){importFailed(f.name,err.message||String(err));status(err.message||String(err),'error')}finally{e.target.value=''}};
+$('networkFile').onchange=async e=>{const f=e.target.files[0];if(!f)return;importProgress('Cargando base de red',f.name,5,'Leyendo archivo…');try{await requireStorage();await ingestNetwork(f)}catch(err){importFailed(f.name,err.message||String(err));status(err.message||String(err),'error')}finally{e.target.value=''}};
+$('excelFile').onchange=async e=>{const f=e.target.files[0];if(!f)return;importProgress('Cargando soportes',f.name,5,'Leyendo archivo…');try{await requireStorage();await ingest(f)}catch(err){importFailed(f.name,err.message||String(err));status(err.message||String(err),'error')}finally{e.target.value=''}};
+$('pointsEnabled').onchange=()=>{pointsEnabled=$('pointsEnabled').checked;render()};
+$('pointsMode').onchange=()=>{pointsMode=$('pointsMode').value;render()};
+$('pointsScope').onchange=()=>{pointsScope=$('pointsScope').value;render()};
 $('quadrantVisibility').onchange=()=>{quadrantVisibility=$('quadrantVisibility').value;if(quadrantVisibility==='manual'&&manualVisibleIds.size===0){const a=analyze(filtered());manualVisibleIds=new Set(a.cells.map(c=>c.id))}selectedCell=null;render()};$('statusFilter').onchange=render;$('viewMode').querySelectorAll('button').forEach(b=>b.onclick=()=>{$('viewMode').querySelectorAll('button').forEach(x=>x.classList.remove('active'));b.classList.add('active');viewMode=b.dataset.mode;render()});
 $('yearsAll').onclick=()=>{document.querySelectorAll('#years input').forEach(i=>{i.checked=true;selectedYears.add(i.value)});renderWeeks();render()};$('yearsNone').onclick=()=>{selectedYears.clear();document.querySelectorAll('#years input').forEach(i=>i.checked=false);renderWeeks();render()};
+// V1.14: borrar solamente los años seleccionados y las semanas marcadas en el filtro.
+// No toca la base de red ni las importaciones; los registros se eliminan de IndexedDB.
+$('deleteWeeks').onclick=async()=>{
+ const btn=$('deleteWeeks');
+ const years=[...selectedYears].sort(),weeks=[...selectedWeekNums].sort((a,b)=>+a-+b);
+ if(!years.length||!weeks.length){alert('Selecciona primero el año y las semanas que deseas eliminar.');return}
+ const targets=new Set(years.flatMap(y=>weeks.map(w=>`${y}-S${w}`)));
+ const affected=allEvents.filter(e=>targets.has(e.week));
+ if(!affected.length){alert('No hay registros almacenados para las semanas seleccionadas.');return}
+ const actualWeeks=[...new Set(affected.map(e=>e.week))].sort();
+ const message=`¿Confirmas la eliminación PERMANENTE de ${affected.length.toLocaleString('es-MX')} registros de las siguientes ${actualWeeks.length} semana(s)?\n\n${actualWeeks.join(', ')}\n\nEsta acción no se puede deshacer. No se eliminará la base de red.`;
+ if(!confirm(message))return;
+ btn.disabled=true;
+ try{
+  // Una transacción: si falla, no se borra una parte del conjunto.
+  await new Promise((resolve,reject)=>{
+   const tx=db.transaction(STORE,'readwrite'),store=tx.objectStore(STORE);
+   affected.forEach(e=>store.delete(e.key));
+   tx.oncomplete=resolve;tx.onerror=()=>reject(tx.error);tx.onabort=()=>reject(tx.error||new Error('Transacción cancelada'));
+  });
+  selectedCell=null;searchAccount='';searchLocations=[];
+  selectedWeekNums.clear();selectedYears.clear();
+  await reload();
+  status(`Se eliminaron ${affected.length.toLocaleString('es-MX')} registros de ${actualWeeks.length} semana(s). La base de red se conservó.`,'ok');
+ }catch(err){status('No se pudieron eliminar las semanas: '+(err.message||String(err)),'error')}
+ finally{btn.disabled=false}
+};
 $('weeksAll').onclick=()=>{document.querySelectorAll('#weeks input').forEach(i=>{i.checked=true;selectedWeekNums.add(i.value)});render()};$('weeksNone').onclick=()=>{selectedWeekNums.clear();document.querySelectorAll('#weeks input').forEach(i=>i.checked=false);render()};
 $('clustersAll').onclick=()=>{document.querySelectorAll('#clusters input').forEach(i=>{i.checked=true;selectedClusters.add(i.value)});render()};$('clustersNone').onclick=()=>{selectedClusters.clear();document.querySelectorAll('#clusters input').forEach(i=>i.checked=false);render()};
 $('top10On').onclick=()=>bulkVisibility('top',true);$('top10Off').onclick=()=>bulkVisibility('top',false);$('restOn').onclick=()=>bulkVisibility('rest',true);$('restOff').onclick=()=>bulkVisibility('rest',false);$('showAllQuadrants').onclick=()=>{quadrantVisibility='all';manualVisibleIds.clear();$('quadrantVisibility').value='all';selectedCell=null;render()};
-$('clearNetwork').onclick=async()=>{if(!confirm('¿Eliminar la base de red guardada localmente en este navegador?'))return;await clearStore(NETWORK);await clearStore(META);networkIndex.clear();networkMeta=null;renderNetworkInfo();render();status('Base de red local eliminada.','ok')};
-$('clearDb').onclick=async()=>{if(!confirm('¿Borrar todo el histórico guardado en este navegador?'))return;await clearStore(STORE);await clearStore(IMPORTS);selectedYears.clear();selectedWeekNums.clear();selectedClusters.clear();selectedCell=null;await reload();status('Histórico eliminado de este navegador.','ok')};
-(async()=>{try{db=await openDB();await reload();if(allEvents.length)status(`Histórico local cargado: ${allEvents.length.toLocaleString('es-MX')} eventos únicos.`,'ok')}catch(e){status('No se pudo abrir el almacenamiento local del navegador: '+e.message,'error')}})();
+// V1.40: only these four stores belong to Soportes. Never delete the entire IndexedDB database or origin storage.
+let deleteSelection={supports:false,network:false};
+function openDeleteDialog(preselect=''){
+ $('deleteSupports').checked=preselect==='supports';$('deleteNetwork').checked=preselect==='network';
+ $('deleteChoice').hidden=false;$('deleteFinal').hidden=true;$('deleteConfirm').checked=false;$('deleteModal').hidden=false;$('deleteModal').dataset.stage='select';
+ $('deleteExecute').disabled=true;$('deleteExecute').textContent='Continuar';
+ $('deleteSummary').textContent=`En este navegador: ${allEvents.length.toLocaleString('es-MX')} eventos de soporte y ${networkIndex.size.toLocaleString('es-MX')} cuentas de red. Selecciona qué deseas eliminar.`;
+ $('deleteError').textContent='';
+}
+function closeDeleteDialog(){$('deleteModal').hidden=true;}
+function updateDeleteButton(){const selected=$('deleteSupports').checked||$('deleteNetwork').checked;const stage=$('deleteModal').dataset.stage;$('deleteExecute').disabled=stage==='select'?!selected:!$('deleteConfirm').checked;}
+$('deleteSupports').onchange=updateDeleteButton;$('deleteNetwork').onchange=updateDeleteButton;$('deleteConfirm').onchange=updateDeleteButton;
+$('deleteCancel').onclick=closeDeleteDialog;
+$('deleteModal').addEventListener('click',e=>{if(e.target===$('deleteModal'))closeDeleteDialog()});
+$('clearDb').onclick=()=>openDeleteDialog();$('clearNetwork').onclick=()=>openDeleteDialog('network');
+$('deleteExecute').onclick=async()=>{
+ if($('deleteModal').dataset.stage==='select'){
+  deleteSelection={supports:$('deleteSupports').checked,network:$('deleteNetwork').checked};
+  if(!deleteSelection.supports&&!deleteSelection.network)return;
+  $('deleteModal').dataset.stage='confirm';$('deleteChoice').hidden=true;$('deleteFinal').hidden=false;
+  $('deleteConfirm').checked=false;$('deleteExecute').disabled=true;$('deleteExecute').textContent='Eliminar definitivamente';
+  const parts=[];if(deleteSelection.supports)parts.push(`${allEvents.length.toLocaleString('es-MX')} soportes y su historial de importaciones`);
+  if(deleteSelection.network)parts.push(`${networkIndex.size.toLocaleString('es-MX')} cuentas de la base de red`);
+  $('deleteFinalSummary').textContent='Se eliminarán de este navegador: '+parts.join(' y ')+'. No se afectará Repeat 60 ni Planta Externa.';
+  return;
+ }
+ if(!$('deleteConfirm').checked)return;
+ $('deleteExecute').disabled=true;$('deleteCancel').disabled=true;
+ try{
+  const stores=[...(deleteSelection.supports?[STORE,IMPORTS]:[]),...(deleteSelection.network?[NETWORK,META]:[])];
+  // One atomic IndexedDB transaction: either all selected stores are cleared, or none are.
+  await new Promise((resolve,reject)=>{const tx=db.transaction(stores,'readwrite');for(const name of stores)tx.objectStore(name).clear();tx.oncomplete=resolve;tx.onerror=()=>reject(tx.error);tx.onabort=()=>reject(tx.error||new Error('Borrado cancelado'))});
+  if(deleteSelection.supports){selectedYears.clear();selectedWeekNums.clear();selectedClusters.clear();selectedCell=null;searchAccount='';searchLocations=[];}
+  await reload();closeDeleteDialog();status('Borrado definitivo completado en el almacenamiento local: '+(deleteSelection.supports?'soportes ':'')+(deleteSelection.network?'base de red':'')+'.','ok');
+ }catch(err){$('deleteError').textContent='No se pudo completar el borrado: '+(err.message||err);$('deleteExecute').disabled=false;status('Error de borrado: '+(err.message||err),'error')}
+ finally{$('deleteCancel').disabled=false}
+};
+(async()=>{setStorageReady(false);try{db=await openDB();await reload();setStorageReady(true);resolveStorageReady();if(allEvents.length)status(`Histórico local cargado: ${allEvents.length.toLocaleString('es-MX')} eventos únicos.`,'ok')}catch(e){setStorageReady(false);rejectStorageReady(e);status('No se pudo abrir el almacenamiento local del navegador: '+e.message,'error')}})();
